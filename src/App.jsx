@@ -4,7 +4,7 @@ import { useState, useRef } from 'react'
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MODEL = 'claude-sonnet-4-20250514'
+const MODEL = 'claude-sonnet-4-6'
 const API_URL = 'https://api.anthropic.com/v1/messages'
 
 const TONE_OPTIONS = [
@@ -115,6 +115,7 @@ Use web_search to find actual, verifiable businesses. Research each one. Return 
         'Content-Type':  'application/json',
         'x-api-key':     apiKey,
         'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'web-search-2025-03-05',
         // This header tells Anthropic's servers that we're calling from a browser
         // intentionally — without it the request would be blocked by CORS
         'anthropic-dangerous-direct-browser-access': 'true',
