@@ -66,45 +66,37 @@ export default function App() {
       ? customTone || 'Friendly & Direct'
       : TONE_OPTIONS.find(t => t.value === tone)?.label ?? tone
 
-  const systemPrompt = () => `
-You are a B2B prospect research agent.
+  const systemPrompt = () => `You are a B2B prospect research agent.
 
-CRITICAL RULE: Use the web_search tool to find REAL businesses. Never invent or fabricate business names, addresses, or details. Every prospect must be a real, verifiable business found via web search.
+OUTPUT FORMAT — THIS IS MANDATORY:
+Your ENTIRE response must be a raw JSON array. Start with [ and end with ]. No text before the [. No text after the ]. No markdown. No code fences. No explanation. No preamble. Just the JSON array.
 
-YOUR TASK:
-1. Search the web to find real ${targetType} businesses in ${location}
-2. Research each business — find their online presence, what they stock, how they operate
-3. Assess fit against the offer: "${offer}"
-4. Write a personalised outreach email for each, using specific intel you found
+If inputs are vague or broad, make reasonable assumptions and still return the JSON array.
 
-OUTPUT: Return ONLY a valid JSON array. No markdown fences, no prose, no explanation — just the raw JSON array.
+TASK:
+1. Use web_search to find ${count} real ${targetType || 'local'} businesses in ${location || 'the UK'}
+2. Research each — find their online presence, what they do, how they operate
+3. Assess fit against the offer: "${offer || 'general business services'}"
+4. Write a personalised outreach email for each using real intel
 
-Each object in the array must have exactly these fields:
+Each array object must have exactly these fields:
 {
-  "name": "Exact real business name",
-  "type": "their specific business type",
+  "name": "Real business name",
+  "type": "their business type",
   "location": "their specific town/area",
-  "intel": "2–3 sentences of specific intel sourced from your research — mention their online presence, products, or anything relevant",
-  "fit_reason": "specific reason why this offer is relevant to THIS business",
-  "priority": "High" | "Medium" | "Low",
-  "email_subject": "compelling, specific subject line",
-  "email_body": "full personalised email body using the intel you found — do NOT repeat the subject line here"
+  "intel": "2-3 sentences of specific intel from your research",
+  "fit_reason": "why this offer fits this specific business",
+  "priority": "High",
+  "email_subject": "compelling subject line",
+  "email_body": "full personalised email body — do not repeat the subject line"
 }
 
-Priority scoring:
-- High: clear product-market fit, active business, likely to benefit immediately
-- Medium: reasonable fit, some relevance, worth a conversation
-- Low: possible interest but uncertain fit
-
+Priority: High = clear fit and active business, Medium = reasonable fit, Low = uncertain fit.
 Email tone: ${activeTone()}
-`.trim()
 
-  const userMessage = () =>
-    `Find ${count} real ${targetType} businesses in ${location}.
+REMEMBER: Respond with ONLY the JSON array. Nothing else.`
 
-My offer: ${offer}
-
-Use web_search to find actual, verifiable businesses. Research each one. Return the JSON array only.`
+  // userMessage is now built inline in runResearch after the clarification step
 
   // ── Core API loop
 
@@ -115,10 +107,11 @@ Use web_search to find actual, verifiable businesses. Research each one. Return 
         'Content-Type':  'application/json',
         'x-api-key':     apiKey,
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'web-search-2025-03-05',
         // This header tells Anthropic's servers that we're calling from a browser
         // intentionally — without it the request would be blocked by CORS
         'anthropic-dangerous-direct-browser-access': 'true',
+        // Required to enable the built-in web search tool
+        'anthropic-beta': 'web-search-2025-03-05',
       },
       body: JSON.stringify({
         model:      MODEL,
@@ -156,11 +149,61 @@ Use web_search to find actual, verifiable businesses. Research each one. Return 
     }, 5000)
 
     try {
-      // The tool-use loop:
+      // ── Stage 1: Intent clarification ──────────────────────────────────────
+      // If inputs are vague, this first call turns them into specific, searchable
+      // terms before we run the main research. This is a multi-stage agent pipeline.
+      // Even with specific inputs this step is fast and improves result quality.
+      const clarifyResp = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+          'anthropic-beta': 'web-search-2025-03-05',
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: 300,
+          system: `You are a search query interpreter. Given vague or specific business research inputs, return a JSON object with two fields:
+{
+  "business_type": "a specific, searchable business type (e.g. 'independent phone repair shops' not 'small businesses')",
+  "location": "a specific, searchable location (e.g. 'Falkirk and Stirling, Scotland' not 'central location')"
+}
+Return ONLY the JSON object. No other text.`,
+          messages: [{
+            role: 'user',
+            content: `Business type: "${targetType}"\nLocation: "${location}"\nOffer context: "${offer}"\n\nInterpret these into specific searchable terms.`
+          }]
+        })
+      })
+
+      let resolvedType = targetType
+      let resolvedLocation = location
+
+      if (clarifyResp.ok) {
+        const clarifyData = await clarifyResp.json()
+        const clarifyText = clarifyData.content?.find(c => c.type === 'text')?.text ?? ''
+        try {
+          const clarifyJson = JSON.parse(clarifyText.match(/\{[\s\S]*\}/)?.[0] ?? '{}')
+          if (clarifyJson.business_type) resolvedType = clarifyJson.business_type
+          if (clarifyJson.location) resolvedLocation = clarifyJson.location
+        } catch { /* keep original inputs if parsing fails */ }
+      }
+
+      // ── Stage 2: Main research loop ────────────────────────────────────────
+      // Now run the actual research with the clarified, specific inputs.
       // Claude may decide to search multiple times. Each time it does, the API
       // returns stop_reason: "tool_use". We acknowledge it and call again until
       // we get stop_reason: "end_turn", which means Claude is done.
-      let messages = [{ role: 'user', content: userMessage() }]
+      const researchMessage = `Find ${count} real ${resolvedType} businesses in ${resolvedLocation}.
+
+My offer: ${offer}
+Email tone: ${activeTone()}
+
+Use web_search to find actual businesses. Return ONLY the JSON array.`
+
+      let messages = [{ role: 'user', content: researchMessage }]
       let resultText = null
 
       for (let i = 0; i < 15; i++) {
@@ -203,14 +246,29 @@ Use web_search to find actual, verifiable businesses. Research each one. Return 
 
       if (!resultText) throw new Error('The agent finished without returning data. Try again.')
 
-      // Extract JSON array from the response
-      // (sometimes Claude adds a tiny bit of prose before/after the JSON)
-      const match = resultText.match(/\[[\s\S]*\]/)
-      if (!match) throw new Error('Could not find a JSON array in the agent response. Try again.')
+      // Extract JSON array — try multiple strategies in case Claude adds small amounts of prose
+      let jsonStr = null
 
-      const parsed = JSON.parse(match[0])
+      // Strategy 1: response is already a clean JSON array
+      if (resultText.trim().startsWith('[')) jsonStr = resultText.trim()
+
+      // Strategy 2: JSON array somewhere inside the response
+      if (!jsonStr) {
+        const m = resultText.match(/\[[\s\S]*\]/)
+        if (m) jsonStr = m[0]
+      }
+
+      // Strategy 3: JSON inside a markdown code block
+      if (!jsonStr) {
+        const m = resultText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
+        if (m && m[1].trim().startsWith('[')) jsonStr = m[1].trim()
+      }
+
+      if (!jsonStr) throw new Error('Could not parse results. Use specific inputs — e.g. "phone repair shops" in "Central Scotland".')
+
+      const parsed = JSON.parse(jsonStr)
       if (!Array.isArray(parsed) || parsed.length === 0) {
-        throw new Error('The agent returned an empty list. Try broadening your search.')
+        throw new Error('The agent returned an empty list. Try more specific inputs.')
       }
 
       setProspects(parsed)
