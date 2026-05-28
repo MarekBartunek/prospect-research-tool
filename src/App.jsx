@@ -115,7 +115,7 @@ REMEMBER: Respond with ONLY the JSON array. Nothing else.`
       },
       body: JSON.stringify({
         model:      MODEL,
-        max_tokens: 8000,
+        max_tokens: 4000,
         system:     systemPrompt(),
         // web_search_20250305 is Anthropic's built-in web search tool.
         // Claude calls it server-side — we don't have to implement searching ourselves.
@@ -223,18 +223,20 @@ Use web_search to find actual businesses. Return ONLY the JSON array.`
           //    already executed the search on their servers)
           setStatusIdx(s => Math.min(s + 1, STATUS_STEPS.length - 1))
 
+          // Only keep tool_use blocks in history — stripping thinking blocks and
+          // search result content prevents token count from exploding across turns.
+          const toolUseOnly = resp.content.filter(c => c.type === 'tool_use')
+
           messages = [
             ...messages,
-            { role: 'assistant', content: resp.content },
+            { role: 'assistant', content: toolUseOnly },
             {
               role: 'user',
-              content: resp.content
-                .filter(c => c.type === 'tool_use')
-                .map(tu => ({
-                  type:        'tool_result',
-                  tool_use_id: tu.id,
-                  content:     '',
-                })),
+              content: toolUseOnly.map(tu => ({
+                type:        'tool_result',
+                tool_use_id: tu.id,
+                content:     '',
+              })),
             },
           ]
           continue
